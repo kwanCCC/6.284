@@ -2,15 +2,60 @@ package mapreduce
 
 import (
 	"hash/fnv"
+	"fmt"
+	"os"
+	"bufio"
 )
 
 func doMap(
 	jobName string, // the name of the MapReduce job
-	mapTask int, // which map task this is
+	mapTask int,    // which map task this is
 	inFile string,
 	nReduce int, // the number of reduce task that will be run ("R" in the paper)
 	mapF func(filename string, contents string) []KeyValue,
 ) {
+	fmt.Sprintf("start %s job", jobName)
+	fmt.Sprintf("this is %d task", mapTask)
+
+	file, e := os.Open(inFile)
+	defer file.Close()
+	if e != nil {
+		fmt.Sprintf("open file %s error %s", inFile, e.Error())
+		return
+	}
+	scanner := bufio.NewScanner(file)
+	var res = make([]KeyValue, 0)
+	for scanner.Scan() {
+		f := mapF(inFile, scanner.Text())
+		res = append(res, f...)
+	}
+	length := len(res)
+	if length == 0 {
+		fmt.Sprintf("job % execute mapFunction but res is null", jobName)
+		return
+	}
+	var reduce_map = make(map[string][]KeyValue)
+	for _, kv := range res {
+		ihash := ihash(kv.Key)
+		reduceNum := ihash % nReduce
+		reduceJobName := reduceName(jobName, mapTask, reduceNum)
+		if reduce_map[reduceJobName] == nil {
+			reduce_map[reduceJobName] = make([]KeyValue, 0)
+		}
+		reduce_map[reduceJobName] = append(reduce_map[reduceJobName], kv)
+	}
+	for k, v := range reduce_map {
+		f, e := os.Create(k)
+		if e != nil {
+			fmt.Sprintf("create file %s error %s", k, e.Error())
+			return
+		}
+		for _, content := range v {
+
+		}
+		f.Close()
+	}
+
 	//
 	// doMap manages one map task: it should read one of the input files
 	// (inFile), call the user-defined map function (mapF) for that file's

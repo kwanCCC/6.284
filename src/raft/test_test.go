@@ -20,7 +20,7 @@ import "sync"
 const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
-	servers := 3
+	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
@@ -48,13 +48,14 @@ func TestInitialElection2A(t *testing.T) {
 }
 
 func TestReElection2A(t *testing.T) {
-	servers := 3
+	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2A): election after network failure")
 
 	leader1 := cfg.checkOneLeader()
+	DPrintf("[TEST] leader is %d", leader1)
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
@@ -932,4 +933,14 @@ func TestReliableChurn2C(t *testing.T) {
 
 func TestUnreliableChurn2C(t *testing.T) {
 	internalChurn(t, true)
+}
+
+func TestTimerRun(t *testing.T) {
+	after := time.After(time.Millisecond * 100)
+	for {
+		select {
+		case <-after:
+			fmt.Print("timer")
+		}
+	}
 }

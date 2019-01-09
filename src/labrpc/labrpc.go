@@ -49,7 +49,7 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "labgob"
+import "github.com/kwanCCC/6.824-golabs-2018/src/labgob"
 import "bytes"
 import "reflect"
 import "sync"
