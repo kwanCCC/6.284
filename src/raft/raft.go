@@ -293,7 +293,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.Term = rf.getCurrentTerm()
 			reply.VoteGranted = true
 			rf.setNowAsLastContact()
-			DPrintf("[WARING] I'm %d and then I give vote to %d", rf.me, args.CandidateId)
+			DPrintf("[WARING] %d give vote to %d", rf.me, args.CandidateId)
 			return
 		}
 	}
@@ -316,7 +316,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// find leader
 	if args.Term > rf.getCurrentTerm() {
-		DPrintf("[WARNING] I")
+		DPrintf("[WARNING] %d find leader %d Term %d", rf.me, args.LeaderId, args.Term)
 		rf.setCurrentTerm(args.Term)
 		rf.setNowAsLastContact()
 		rf.atomicStoreState(FOLLOWER)
@@ -405,7 +405,7 @@ func (rf *Raft) readLastContact() time.Time {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	DPrintf("[WARNING] I'm %d send RequestVote to server %d and res is %b", rf.me, server, ok)
+	DPrintf("[WARNING] I'm %d send RequestVote to server %d and then resp is %t", rf.me, server, ok)
 	return ok
 }
 
@@ -463,9 +463,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.state = FOLLOWER
 	rf.config = &Config{
-		followTimeout:   time.Duration(time.Millisecond * 50),
-		electionTimeout: time.Duration(time.Millisecond * 100),
-		leaderLeaseTime: time.Duration(time.Millisecond * 25),
+		followTimeout:   time.Duration(time.Millisecond * 150),
+		electionTimeout: time.Duration(time.Millisecond * 200),
+		leaderLeaseTime: time.Duration(time.Millisecond * 100),
 	}
 	entries := make([]LogEntry, 0)
 	entries = append(entries, LogEntry{Term: 0})
