@@ -26,9 +26,9 @@ import (
 	"time"
 
 	"context"
+	"labrpc"
 
 	"labgob"
-	"labrpc"
 )
 
 // import "bytes"
@@ -435,7 +435,7 @@ func (rf *Raft) write(command interface{}) {
 			rf.mu.Lock()
 			followerNextID := rf.nextIndex[reply.FollowerID]
 			followerNextID--
-
+			go rf.appendEntriesTo(replies, reply.FollowerID, followerNextID, index)
 		}
 	}
 }
@@ -450,12 +450,16 @@ func (rf *Raft) appendEntriesTo(replies chan *AppendEntriesReply, follower int, 
 			DPrintf("[WARNING] Leader %d want to send %d, indexOutOfBound from %d to %d but len %d", rf.me, follower, fromIndex, toIndex)
 			return
 		}
-		&AppendEntriesArgs{
+
+		appendEntriesArgs := &AppendEntriesArgs{
 			Term:         rf.getCurrentTerm(),
 			LeaderId:     rf.me,
 			PrevLogIndex: fromIndex,
 		}
-		rf.logs[fromIndex : toIndex+1]
+		appendEntriesReply := &AppendEntriesReply{}
+		if rf.sendAppendEntries(follower, appendEntriesArgs, appendEntriesReply) {
+			replies <- appendEntriesReply
+		}
 	}()
 }
 
