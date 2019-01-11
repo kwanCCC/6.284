@@ -70,8 +70,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term       int
+	Success    bool
+	FollowerID int
 }
 
 type Config struct {
@@ -409,6 +410,86 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) write(command interface{}) {
+	rf.mu.Lock()
+	logEntry := LogEntry{
+		Command: command,
+		Term:    rf.getCurrentTerm(),
+	}
+	//add to local but not persist
+	rf.logs = append(rf.logs, logEntry)
+	index := len(rf.logs) - 1
+	rf.mu.Unlock()
+	replies := rf.broadcast(index)
+	agree := rf.quorumSize()
+
+	select {
+	case reply := <-replies:
+		if reply.Success && reply.Term == rf.getCurrentTerm() {
+			agree++
+			rf.mu.Lock()
+			rf.nextIndex[reply.FollowerID] = index
+			rf.matchIndex[reply.FollowerID] = index
+			rf.mu.Unlock()
+		} else if !reply.Success && reply.Term == rf.getCurrentTerm() {
+			rf.mu.Lock()
+			followerNextID := rf.nextIndex[reply.FollowerID]
+			followerNextID--
+
+		}
+	}
+}
+
+func (rf *Raft) appendEntriesTo(replies chan *AppendEntriesReply, follower int, fromIndex int, toIndex int) {
+	if rf.atomicGetState() != LEADER {
+		return
+	}
+	go func() {
+		rf.mu.Lock()
+		if toIndex+1 > len(rf.logs)-1 {
+			DPrintf("[WARNING] Leader %d want to send %d, indexOutOfBound from %d to %d but len %d", rf.me, follower, fromIndex, toIndex)
+			return
+		}
+		&AppendEntriesArgs{
+			Term:         rf.getCurrentTerm(),
+			LeaderId:     rf.me,
+			PrevLogIndex: fromIndex,
+		}
+		rf.logs[fromIndex : toIndex+1]
+	}()
+}
+
+func (rf *Raft) broadcast(endIndex int) chan *AppendEntriesReply {
+	replies := make(chan *AppendEntriesReply, len(rf.peers)-1)
+	for index := range rf.peers {
+		if index == rf.me {
+			continue
+		}
+		go func() {
+			if rf.atomicGetState() != LEADER {
+				return
+			}
+			prevLogIndex := rf.nextIndex[index]
+			prelogTerm := rf.logs[prevLogIndex].Term
+			appendEntriesArgs := &AppendEntriesArgs{
+				Term:         rf.getCurrentTerm(),
+				LeaderId:     rf.me,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prelogTerm,
+				Entries:      rf.logs[prevLogIndex : index+1],
+				LeaderCommit: rf.commitIndex,
+			}
+			reply := &AppendEntriesReply{
+				FollowerID: index,
+			}
+			if rf.sendAppendEntries(index, appendEntriesArgs, reply) {
+				replies <- reply
+			}
+		}()
+	}
+	return replies
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -423,10 +504,15 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // term. the third return value is true if this server believes it is
 // the leader.
 //
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
+	index = -1
+	term = -1
+	isLeader = false
+
+	term, isLeader = rf.GetState()
+	if !isLeader {
+		return
+	}
 
 	// Your code here (2B).
 
@@ -584,20 +670,9 @@ func (rf *Raft) voteSelf(ctx context.Context) <-chan *RequestVoteReply {
 	return voteReplies
 }
 
-func timeTricker(duration time.Duration) <-chan time.Time {
-	return time.After(duration);
+func timeTrigger(duration time.Duration) <-chan time.Time {
+	return time.After(duration)
 }
-
-type RPC struct {
-	Command interface{}
-}
-
-//func (rf *Raft) processRPC(rpc RPC) {
-//	switch cmd := rpc.Command.(type) {
-//	case *RequestVoteArgs:
-//		rf.RequestVote()
-//	}
-//}
 
 // Three Loop
 func (rf *Raft) FollowerLoop() {
@@ -700,7 +775,7 @@ func (rf *Raft) sendHeartBeat() <-chan *AppendEntriesReply {
 func (rf *Raft) LeaderLoop() {
 	rf.isLeader = true
 	//randomTimeout(rf.config.followTimeout / 2)
-	sendHeartBeat := timeTricker(rf.config.leaderLeaseTime)
+	sendHeartBeat := timeTrigger(rf.config.leaderLeaseTime)
 	q := rf.quorumSize()
 leaderLoop:
 	for {
@@ -736,7 +811,7 @@ leaderLoop:
 					}
 				}
 			}
-			sendHeartBeat = timeTricker(rf.config.leaderLeaseTime)
+			sendHeartBeat = timeTrigger(rf.config.leaderLeaseTime)
 		case state := <-rf.stateChan:
 			if state != LEADER {
 				break leaderLoop

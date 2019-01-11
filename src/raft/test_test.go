@@ -939,11 +939,10 @@ func TestUnreliableChurn2C(t *testing.T) {
 }
 
 func TestTimerRun(t *testing.T) {
-	after := time.After(time.Millisecond * 100)
-	for {
-		select {
-		case <-after:
-			fmt.Print("timer")
-		}
-	}
+	a := make([]int, 3)
+	a[0] = 0
+	a[1] = 1
+	a[2] = 2
+	a[3] = 3
+	DPrintf("res ", a[1:3])
 }
