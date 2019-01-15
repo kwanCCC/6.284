@@ -326,6 +326,9 @@ func (cfg *config) checkOneLeader() int {
 		}
 
 		if len(leaders) != 0 {
+			for k := range leaders {
+				DPrintf("[TEST] checkOneLeader %d", leaders[k])
+			}
 			return leaders[lastTermWithLeader][0]
 		}
 	}

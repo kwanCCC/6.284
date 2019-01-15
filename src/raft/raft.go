@@ -422,15 +422,24 @@ func (rf *Raft) write(command interface{}) {
 	rf.mu.Unlock()
 	replies := rf.broadcast(index)
 	agree := rf.quorumSize()
+	waitToCommit := 0
 
 	select {
 	case reply := <-replies:
 		if reply.Success && reply.Term == rf.getCurrentTerm() {
-			agree++
+			waitToCommit++
 			rf.mu.Lock()
 			rf.nextIndex[reply.FollowerID] = index
 			rf.matchIndex[reply.FollowerID] = index
 			rf.mu.Unlock()
+			if waitToCommit > agree {
+				rf.mu.Lock()
+				rf.commitIndex = index
+				rf.mu.Unlock()
+				// larger than quorumSize than commit index once
+				waitToCommit = 0
+			}
+			// confict than nextId-- and retry
 		} else if !reply.Success && reply.Term == rf.getCurrentTerm() {
 			rf.mu.Lock()
 			followerNextID := rf.nextIndex[reply.FollowerID]
@@ -450,7 +459,7 @@ func (rf *Raft) appendEntriesTo(replies chan *AppendEntriesReply, follower int, 
 			DPrintf("[WARNING] Leader %d want to send %d, indexOutOfBound from %d to %d but len %d", rf.me, follower, fromIndex, toIndex)
 			return
 		}
-
+		rf.mu.Unlock()
 		appendEntriesArgs := &AppendEntriesArgs{
 			Term:         rf.getCurrentTerm(),
 			LeaderId:     rf.me,
@@ -469,10 +478,11 @@ func (rf *Raft) broadcast(endIndex int) chan *AppendEntriesReply {
 		if index == rf.me {
 			continue
 		}
-		go func() {
+		go func(index int) {
 			if rf.atomicGetState() != LEADER {
 				return
 			}
+			rf.lastLog()
 			prevLogIndex := rf.nextIndex[index]
 			prelogTerm := rf.logs[prevLogIndex].Term
 			appendEntriesArgs := &AppendEntriesArgs{
@@ -489,7 +499,7 @@ func (rf *Raft) broadcast(endIndex int) chan *AppendEntriesReply {
 			if rf.sendAppendEntries(index, appendEntriesArgs, reply) {
 				replies <- reply
 			}
-		}()
+		}(index)
 	}
 	return replies
 }
@@ -518,7 +528,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 		return
 	}
 
-	// Your code here (2B).
+	rf.write(command)
 
 	return index, term, isLeader
 }
@@ -582,11 +592,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			switch rf.atomicGetState() {
 
 			case FOLLOWER:
-				rf.FollowerLoop()
+				rf.followerLoop()
 			case CANDIDATE:
-				rf.CandidateLoop()
+				rf.candidateLoop()
 			case LEADER:
-				rf.LeaderLoop()
+				rf.leaderLoop()
 			}
 		}
 	}()
@@ -634,14 +644,15 @@ func (rf *Raft) increaseTerm() (newterm int) {
 func (rf *Raft) rollback() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.currentTerm -= 1
+	rf.currentTerm--
 }
 
 func (rf *Raft) quorumSize() int {
 	return (len(rf.peers) + 1) / 2
 }
 
-func (rf *Raft) voteSelf(ctx context.Context) <-chan *RequestVoteReply {
+func (rf *Raft) voteSelf() (<-chan *RequestVoteReply, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
 	voteReplies := make(chan *RequestVoteReply, len(rf.peers))
 	newTerm := rf.increaseTerm()
 	requestVoteArgs := &RequestVoteArgs{
@@ -664,22 +675,21 @@ func (rf *Raft) voteSelf(ctx context.Context) <-chan *RequestVoteReply {
 					VoteGranted: false,
 				}
 				if rf.sendRequestVote(index, requestVoteArgs, reply) {
-					DPrintf("[WARNING] I'm %d receive from %d reply.Term %d reply.VoteGranted %b", rf.me, index, reply.Term, reply.VoteGranted)
+					DPrintf("[WARNING] I'm %d receive from %d reply.Term %d reply.VoteGranted %t", rf.me, index, reply.Term, reply.VoteGranted)
 					voteReplies <- reply
 				}
 			}
 
 		}(index, ctx)
 	}
-	return voteReplies
+	return voteReplies, cancel
 }
 
 func timeTrigger(duration time.Duration) <-chan time.Time {
 	return time.After(duration)
 }
 
-// Three Loop
-func (rf *Raft) FollowerLoop() {
+func (rf *Raft) followerLoop() {
 	checkHearBeatCK := randomTimeout(rf.config.followTimeout)
 followerLoop:
 	for {
@@ -705,11 +715,10 @@ followerLoop:
 
 }
 
-func (rf *Raft) CandidateLoop() {
+func (rf *Raft) candidateLoop() {
 	votes := 0
 	timeout := randomTimeout(rf.config.electionTimeout)
-	ctx, cancel := context.WithCancel(context.Background())
-	voteReplies := rf.voteSelf(ctx)
+	voteReplies, cancel := rf.voteSelf()
 	needVote := rf.quorumSize()
 	DPrintf("[WARING] I'm %d and want to be leader", rf.me)
 candidateLoop:
@@ -720,6 +729,7 @@ candidateLoop:
 			DPrintf("[WARNING] I'm %d Election timeout", rf.me)
 			rf.rollback()
 			timeout = randomTimeout(rf.config.electionTimeout)
+			cancel()
 			return
 		case vote := <-voteReplies:
 			if vote.Term > rf.getCurrentTerm() {
@@ -776,10 +786,11 @@ func (rf *Raft) sendHeartBeat() <-chan *AppendEntriesReply {
 	return replies
 }
 
-func (rf *Raft) LeaderLoop() {
+func (rf *Raft) leaderLoop() {
 	rf.isLeader = true
-	//randomTimeout(rf.config.followTimeout / 2)
 	sendHeartBeat := timeTrigger(rf.config.leaderLeaseTime)
+	//@TODO: send a no-op heart beat immedately
+	rf.sendHeartBeat()
 	q := rf.quorumSize()
 leaderLoop:
 	for {
