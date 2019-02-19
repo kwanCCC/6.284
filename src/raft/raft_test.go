@@ -48,7 +48,7 @@ func TestInitialElection2A(t *testing.T) {
 }
 
 func TestReElection2A(t *testing.T) {
-	servers := 3
+	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
@@ -82,7 +82,8 @@ func TestReElection2A(t *testing.T) {
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
-	_, status := cfg.rafts[(leader2+1)%servers].GetState()
+	l2_1 := (leader2 + 1) % servers
+	_, status := cfg.rafts[l2_1].GetState()
 	DPrintf("[TEST] re-connect %d ,is leader %t", (leader2+1)%servers, status)
 	leader3 := cfg.checkOneLeader()
 	DPrintf("[TEST] after %d re-join ,leader is", (leader2+1)%servers, leader3)

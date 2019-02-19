@@ -415,7 +415,7 @@ func (rf *Raft) readLastContact() time.Time {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	DPrintf("[WARNING] I'm %d send RequestVote to server %d and then resp is %t", rf.me, server, ok)
+	// DPrintf("[WARNING] I'm %d send RequestVote to server %d and then resp is %t", rf.me, server, ok)
 	return ok
 }
 
