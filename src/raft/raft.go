@@ -143,8 +143,8 @@ func (rf *Raft) GetState() (int, bool) {
 	//var term int
 	//var isleader bool
 	// Your code here (2A).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.currentTermRW.RLock()
+	defer rf.currentTermRW.RUnlock()
 	return rf.currentTerm, rf.isLeader
 }
 
@@ -268,7 +268,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//		rf.sendRequestVote(index, args)
 	//	}(index, args)
 	//}
-	DPrintf("[WARING] I'm %d receive vote request from %d, lastLogTerm %d, lastLogIndex %d, Term %d", rf.me, args.CandidateId, args.LastLogTerm, args.LastLogIndex, args.Term)
+	lastLog, index := rf.lastLog()
+	DPrintf("[WARING] I'm %d lastLogTerm %d,lastLogIndex,%d,Term %d,receive vote request from %d, lastLogTerm %d, lastLogIndex %d, Term %d", rf.me, lastLog.Term, index, rf.getCurrentTerm(), args.CandidateId, args.LastLogTerm, args.LastLogIndex, args.Term)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = args.Term
@@ -320,6 +321,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("[WARNING] %d find leader %d Term %d", rf.me, args.LeaderId, args.Term)
 		rf.setCurrentTerm(args.Term)
 		rf.setNowAsLastContact()
+		rf.notLeader()
 		rf.atomicStoreState(FOLLOWER)
 		rf.votedFor = -1
 		rf.persist()
@@ -335,7 +337,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				needToAppendIndex := appendBeginIndex + index
 				if needToAppendIndex < lastIndex && rf.logs[needToAppendIndex].Term != entry.Term {
 					newStart = needToAppendIndex
-					args.Entries = args.Entries[index:]
+					// args.Entries = args.Entries[index:]
 				}
 			}
 			if newStart != 0 {
@@ -344,6 +346,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.logs = append(rf.logs, args.Entries...)
 		}
 		if args.LeaderCommit > rf.commitIndex {
+			// push commit index
 			lastIndex := len(rf.logs) - 1
 			rf.commitIndex = min(args.LeaderCommit, lastIndex)
 		}
@@ -353,6 +356,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		reply.Term = rf.getCurrentTerm()
 	}
+}
+
+func (rf *Raft) notLeader() {
+	rf.currentTermRW.Lock()
+	rf.isLeader = false
+	rf.currentTermRW.Unlock()
 }
 
 func min(a, b int) int {
@@ -482,7 +491,6 @@ func (rf *Raft) broadcast(endIndex int) chan *AppendEntriesReply {
 			if rf.atomicGetState() != LEADER {
 				return
 			}
-			rf.lastLog()
 			prevLogIndex := rf.nextIndex[index]
 			prelogTerm := rf.logs[prevLogIndex].Term
 			appendEntriesArgs := &AppendEntriesArgs{
@@ -590,7 +598,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			}
 
 			switch rf.atomicGetState() {
-
 			case FOLLOWER:
 				rf.followerLoop()
 			case CANDIDATE:
@@ -637,7 +644,6 @@ func (rf *Raft) increaseTerm() (newterm int) {
 	rf.currentTermRW.Lock()
 	defer rf.currentTermRW.Unlock()
 	newterm = rf.currentTerm + 1
-	rf.currentTerm = newterm
 	return
 }
 
@@ -651,7 +657,7 @@ func (rf *Raft) quorumSize() int {
 	return (len(rf.peers) + 1) / 2
 }
 
-func (rf *Raft) voteSelf() (<-chan *RequestVoteReply, context.CancelFunc) {
+func (rf *Raft) voteSelf() (<-chan *RequestVoteReply, context.CancelFunc, int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	voteReplies := make(chan *RequestVoteReply, len(rf.peers))
 	newTerm := rf.increaseTerm()
@@ -662,9 +668,6 @@ func (rf *Raft) voteSelf() (<-chan *RequestVoteReply, context.CancelFunc) {
 		LastLogTerm:  rf.lastlogterm,
 	}
 	for index := range rf.peers {
-		if index == rf.me {
-			continue
-		}
 		go func(index int, ctx context.Context) {
 			select {
 			case <-ctx.Done():
@@ -674,15 +677,21 @@ func (rf *Raft) voteSelf() (<-chan *RequestVoteReply, context.CancelFunc) {
 				reply := &RequestVoteReply{
 					VoteGranted: false,
 				}
-				if rf.sendRequestVote(index, requestVoteArgs, reply) {
-					DPrintf("[WARNING] I'm %d receive from %d reply.Term %d reply.VoteGranted %t", rf.me, index, reply.Term, reply.VoteGranted)
+				if index == rf.me {
+					reply.VoteGranted = true
+					reply.Term = newTerm
 					voteReplies <- reply
+				} else {
+					if rf.sendRequestVote(index, requestVoteArgs, reply) {
+						DPrintf("[WARNING] I'm %d receive from %d reply.Term %d reply.VoteGranted %t", rf.me, index, reply.Term, reply.VoteGranted)
+						voteReplies <- reply
+					}
 				}
 			}
 
 		}(index, ctx)
 	}
-	return voteReplies, cancel
+	return voteReplies, cancel, newTerm
 }
 
 func timeTrigger(duration time.Duration) <-chan time.Time {
@@ -704,10 +713,10 @@ followerLoop:
 			}
 			//heart beat timeout
 			rf.atomicStoreState(CANDIDATE)
-			DPrintf("[WARING] I'm Follower %d -> Candidate", rf.me)
 			break followerLoop
 		case state := <-rf.stateChan:
 			if state != FOLLOWER {
+				DPrintf("[WARING] out of follower state %d", rf.me)
 				break followerLoop
 			}
 		}
@@ -718,7 +727,7 @@ followerLoop:
 func (rf *Raft) candidateLoop() {
 	votes := 0
 	timeout := randomTimeout(rf.config.electionTimeout)
-	voteReplies, cancel := rf.voteSelf()
+	voteReplies, cancel, newTerm := rf.voteSelf()
 	needVote := rf.quorumSize()
 	DPrintf("[WARING] I'm %d and want to be leader", rf.me)
 candidateLoop:
@@ -727,33 +736,32 @@ candidateLoop:
 		case <-timeout:
 			//	rf state has been candidate already
 			DPrintf("[WARNING] I'm %d Election timeout", rf.me)
-			rf.rollback()
+			// rf.rollback()
 			timeout = randomTimeout(rf.config.electionTimeout)
+			rf.atomicStoreState(CANDIDATE)
 			cancel()
 			return
 		case vote := <-voteReplies:
-			if vote.Term > rf.getCurrentTerm() {
-
+			if vote.Term > newTerm {
 				rf.atomicStoreState(FOLLOWER)
 				rf.setCurrentTerm(vote.Term)
 				DPrintf("[WARING] I'm %d -> follower", rf.me)
 				break candidateLoop
 			}
 			if vote.VoteGranted {
-				DPrintf("[WARING] I'm %d receive a vote success", rf.me)
 				votes++
 			}
 			if votes >= needVote {
 				cancel()
+				rf.setCurrentTerm(newTerm)
 				rf.atomicStoreState(LEADER)
 				DPrintf("[WARNING] I'm %d receive %d votes", rf.me, votes)
 				break candidateLoop
 			}
 		case state := <-rf.stateChan:
 			if state != CANDIDATE {
+				DPrintf("[WARING] out of Candidate state %d", rf.me)
 				break candidateLoop
-			} else {
-				continue
 			}
 		}
 	}
@@ -788,10 +796,9 @@ func (rf *Raft) sendHeartBeat() <-chan *AppendEntriesReply {
 
 func (rf *Raft) leaderLoop() {
 	rf.isLeader = true
-	sendHeartBeat := timeTrigger(rf.config.leaderLeaseTime)
-	//@TODO: send a no-op heart beat immedately
-	rf.sendHeartBeat()
 	q := rf.quorumSize()
+	//send no-op heart beat immedately
+	sendHeartBeat := timeTrigger(0)
 leaderLoop:
 	for {
 		select {
@@ -829,6 +836,7 @@ leaderLoop:
 			sendHeartBeat = timeTrigger(rf.config.leaderLeaseTime)
 		case state := <-rf.stateChan:
 			if state != LEADER {
+				DPrintf("[WARING] out of LEADER state %d", rf.me)
 				break leaderLoop
 			}
 		}
